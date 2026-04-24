@@ -6,8 +6,8 @@ const defaultHost = Platform.select({
   default: 'localhost',
 });
 
-export const USE_REMOTE_BACKEND = false;
-export const REMOTE_BACKEND_URL = 'https://your-public-backend-url.com';
+export const USE_REMOTE_BACKEND = true;
+export const REMOTE_BACKEND_URL = 'https://echo-connect-backend.onrender.com';
 export const BACKEND_HOST = defaultHost;
 export const BACKEND_PORT = 5000;
 

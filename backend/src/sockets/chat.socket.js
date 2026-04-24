@@ -8,7 +8,7 @@ const {
   markMessagesSeen,
 } = require('../services/message.service');
 const { notifyRecipients } = require('../services/notification.service');
-const { setUserOffline, setUserOnline } = require('../services/presence.service');
+const { setUserOffline, setUserOnline, getOnlineUsers } = require('../services/presence.service');
 
 module.exports = function registerChatSocket(io) {
   io.use(async (socket, next) => {
@@ -38,6 +38,11 @@ module.exports = function registerChatSocket(io) {
   io.on('connection', (socket) => {
     setUserOnline(socket.user._id, socket.id);
     socket.join(`user:${socket.user._id}`);
+
+    const onlineUsers = getOnlineUsers();
+    onlineUsers.forEach((userId) => {
+      socket.emit('presence', { userId, status: 'online' });
+    });
 
     socket.broadcast.emit('presence', {
       userId: socket.user._id,

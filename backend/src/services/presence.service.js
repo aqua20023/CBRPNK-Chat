@@ -33,8 +33,13 @@ function isUserOnline(userId) {
   return socketsByUser.has(String(userId));
 }
 
+function getOnlineUsers() {
+  return Array.from(socketsByUser.keys());
+}
+
 module.exports = {
   setUserOnline,
   setUserOffline,
   isUserOnline,
+  getOnlineUsers,
 };

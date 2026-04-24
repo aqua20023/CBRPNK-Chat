@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "CBRPNK Chat",
-    "slug": "cbrpnk-chat",
+    "name": "Echo Connect",
+    "slug": "echo-connect",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
@@ -17,6 +17,11 @@
     },
     "ios": {
       "bundleIdentifier": "com.cbrpnk.chat"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "b2aecc28-1dad-48ff-9b7c-48f00a66e705"
+      }
     }
   }
 }
