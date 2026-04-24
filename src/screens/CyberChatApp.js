@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
+  Animated,
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -8,7 +10,7 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
-import { chats as initialChats, callMoments, folders, messagesByChat as initialMessages, stackBlueprint } from '../data/mockData';
+import { callMoments, chatLists, stackBlueprint } from '../data/mockData';
 import { createTheme, radii, spacing } from '../theme/theme';
 import { CyberCard } from '../components/CyberCard';
 import { ConversationListItem } from '../components/ConversationListItem';
@@ -16,17 +18,211 @@ import { FolderStrip } from '../components/FolderStrip';
 import { MessageBubble } from '../components/MessageBubble';
 import { ComposerDock } from '../components/ComposerDock';
 import { CallOverlay } from '../components/CallOverlay';
+import { CreateChatOverlay } from '../components/CreateChatOverlay';
+import {
+  createDirectChat,
+  createGroupChat,
+  fetchBackendHealth,
+  fetchChats,
+  fetchMe,
+  fetchMessages,
+  fetchUsers,
+  login,
+  markChatSeen,
+  register,
+} from '../services/chatApi';
+import { createChatSocket } from '../services/socketClient';
 
-function cloneMessages() {
-  return JSON.parse(JSON.stringify(initialMessages));
+const toneKeys = ['mustard', 'olive', 'fog', 'salmon'];
+
+function formatClock(value) {
+  if (!value) {
+    return 'NOW';
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'NOW';
+  }
+
+  return date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
-function formatStatusSequence(updateMessageStatus, chatId, messageId) {
-  setTimeout(() => updateMessageStatus(chatId, messageId, 'delivered'), 700);
-  setTimeout(() => updateMessageStatus(chatId, messageId, 'seen'), 1600);
+function toneFromId(value) {
+  const source = String(value || '');
+  let total = 0;
+
+  for (let index = 0; index < source.length; index += 1) {
+    total += source.charCodeAt(index);
+  }
+
+  return toneKeys[total % toneKeys.length];
 }
 
-function buildReplySnippet(messages, replyToId) {
+function describeLatestMessage(message) {
+  if (!message) {
+    return 'No messages yet.';
+  }
+
+  if (message.text) {
+    return message.text;
+  }
+
+  if (message.attachments?.length) {
+    return `Shared ${message.attachments[0].name || 'an attachment'}`;
+  }
+
+  if (message.kind === 'voice') {
+    return 'Voice note';
+  }
+
+  return `${message.kind || 'message'} update`;
+}
+
+function getPresenceState(chat, currentUserId, presenceMap) {
+  const participants = chat.participants || [];
+  const others = participants.filter(
+    (participant) => String(participant.user?._id || participant.user) !== String(currentUserId),
+  );
+
+  return others.some(
+    (participant) => presenceMap[String(participant.user?._id || participant.user)] === 'online',
+  );
+}
+
+function mapServerChat(chat, currentUserId, presenceMap) {
+  const id = String(chat._id);
+  const participants = chat.participants || [];
+  const others = participants.filter(
+    (participant) => String(participant.user?._id || participant.user) !== String(currentUserId),
+  );
+
+  return {
+    ...chat,
+    id,
+    code: id.slice(-6).toUpperCase(),
+    title: chat.name || 'Untitled chat',
+    avatarUrl: chat.avatarUrl || others[0]?.user?.avatarUrl || 'https://via.placeholder.com/300/202020/F3E7D6?text=CB',
+    preview: describeLatestMessage(chat.latestMessage),
+    timestamp: formatClock(chat.latestMessage?.createdAt || chat.updatedAt),
+    unread: chat.membership?.unreadCount || 0,
+    online: getPresenceState(chat, currentUserId, presenceMap),
+    pinned: Boolean(chat.membership?.isPinned),
+    tone: toneFromId(id),
+    type: chat.type === 'direct' ? '1:1' : 'Group',
+    conversationType: chat.type,
+    memberCount: chat.memberCount || participants.length,
+    lists: chat.membership?.customLists || ['all'],
+  };
+}
+
+function deriveStatus(message, currentUserId) {
+  const deliveredCount = message.deliveredTo?.length || 0;
+  const seenCount = message.seenBy?.length || 0;
+
+  if (!message.senderId || String(message.senderId._id || message.senderId) !== String(currentUserId)) {
+    return 'seen';
+  }
+
+  if (seenCount > 1) {
+    return 'seen';
+  }
+
+  if (deliveredCount > 1) {
+    return 'delivered';
+  }
+
+  return 'sent';
+}
+
+function normalizeKind(message) {
+  if (message.kind === 'text' || message.kind === 'poll' || message.kind === 'voice') {
+    return message.kind;
+  }
+
+  if (message.kind === 'location') {
+    return 'location';
+  }
+
+  if (message.kind === 'link') {
+    return 'link';
+  }
+
+  if (message.attachments?.length) {
+    return 'file';
+  }
+
+  return 'text';
+}
+
+function mapServerMessage(message, currentUserId) {
+  const sender = message.senderId || {};
+  const attachment = message.attachments?.[0];
+  const sizeLabel = attachment?.size ? `${Math.round(attachment.size / 1024)} KB` : '';
+
+  return {
+    id: String(message._id),
+    kind: normalizeKind(message),
+    author: sender.name || 'Unknown',
+    fromMe: String(sender._id || sender) === String(currentUserId),
+    text: message.text || '',
+    time: formatClock(message.createdAt),
+    status: deriveStatus(message, currentUserId),
+    reactions: message.reactions || [],
+    pinned: false,
+    replyTo: message.replyTo?._id ? String(message.replyTo._id) : message.replyTo || null,
+    replyPreview:
+      message.replyTo?.text ||
+      message.replyTo?.title ||
+      message.replyTo?.location ||
+      message.replyTo?.urlTitle ||
+      null,
+    title: attachment?.name || '',
+    fileType: attachment?.mimeType?.split('/')?.[1]?.toUpperCase() || 'FILE',
+    size: sizeLabel,
+    duration: message.metadata?.duration || '0:00',
+    waveform: message.metadata?.waveform || [0.5, 0.7, 0.4, 0.8, 0.6, 0.5],
+    options: message.metadata?.options || [],
+    location: message.metadata?.location || '',
+    coordinates: message.metadata?.coordinates || '',
+    urlTitle: message.metadata?.urlTitle || '',
+    urlDomain: message.metadata?.urlDomain || '',
+    urlExcerpt: message.metadata?.urlExcerpt || '',
+  };
+}
+
+function getListMatch(chat, selectedList) {
+  if (selectedList === 'all') {
+    return true;
+  }
+
+  if (selectedList === 'friends') {
+    return chat.conversationType === 'direct';
+  }
+
+  if (selectedList === 'groups') {
+    return chat.conversationType === 'group';
+  }
+
+  if (selectedList === 'unread') {
+    return chat.unread > 0;
+  }
+
+  if (selectedList === 'pinned') {
+    return chat.pinned;
+  }
+
+  return chat.lists.includes(selectedList);
+}
+
+function buildReplySnippet(messages, replyToId, replyPreview) {
+  if (replyPreview) {
+    return replyPreview;
+  }
+
   if (!replyToId) {
     return null;
   }
@@ -43,35 +239,164 @@ function buildReplySnippet(messages, replyToId) {
   return source.text || source.title || source.location || source.urlTitle || 'Attachment';
 }
 
-function createAutoReply(chat) {
-  const scripts = {
-    'ua-570-b': 'Copy that. I am turning the telemetry cards into the primary reading rhythm.',
-    ts26: 'Thread updated. Search, folders, and pin logic all stay visible in the first fold.',
-    'retro-25': 'Dropping sticker variants next. The composer will feel much more alive.',
-    'sector-01': 'Call lane synced. Screen-share affordance will stay one tap away.',
-  };
+function upsertMessage(currentMessages, nextMessage) {
+  const messageId = String(nextMessage._id);
+  const clientMessageId = nextMessage.clientMessageId;
+  const index = currentMessages.findIndex((message) => {
+    if (String(message._id) === messageId) {
+      return true;
+    }
 
-  return scripts[chat.id] || 'Signal received. Continuing with the next pass.';
+    return clientMessageId && message.clientMessageId && message.clientMessageId === clientMessageId;
+  });
+
+  if (index === -1) {
+    return [...currentMessages, nextMessage].sort(
+      (left, right) => new Date(left.createdAt) - new Date(right.createdAt),
+    );
+  }
+
+  const nextMessages = [...currentMessages];
+  nextMessages[index] = nextMessage;
+  return nextMessages.sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt));
+}
+
+function sortChats(chats) {
+  return [...chats].sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
+}
+
+function buildOptimisticMessage({ chatId, currentUser, text, clientMessageId, replyTo }) {
+  return {
+    _id: `temp-${clientMessageId}`,
+    chatId,
+    senderId: {
+      _id: currentUser._id,
+      name: currentUser.name,
+      avatarUrl: currentUser.avatarUrl,
+    },
+    text,
+    kind: 'text',
+    clientMessageId,
+    replyTo: replyTo
+      ? {
+          _id: replyTo.id,
+          text: replyTo.text,
+          title: replyTo.title,
+          location: replyTo.location,
+          urlTitle: replyTo.urlTitle,
+        }
+      : null,
+    attachments: [],
+    metadata: {},
+    deliveredTo: [currentUser._id],
+    seenBy: [currentUser._id],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function applyProfileUpdateToChats(chats, payload) {
+  return chats.map((chat) => {
+    const participants = (chat.participants || []).map((participant) => {
+      if (String(participant.user?._id || participant.user) !== String(payload.userId)) {
+        return participant;
+      }
+
+      return {
+        ...participant,
+        user: {
+          ...participant.user,
+          ...payload.profile,
+        },
+      };
+    });
+
+    const shouldUpdateAvatar =
+      chat.type === 'direct' &&
+      participants.some(
+        (participant) => String(participant.user?._id || participant.user) === String(payload.userId),
+      );
+
+    return {
+      ...chat,
+      participants,
+      name:
+        chat.type === 'direct' && shouldUpdateAvatar
+          ? participants
+              .filter(
+                (participant) => String(participant.user?._id || participant.user) !== String(payload.currentUserId),
+              )
+              .map((participant) => participant.user.name)
+              .join(', ') || chat.name
+          : chat.name,
+      avatarUrl: shouldUpdateAvatar ? payload.profile.avatarUrl || chat.avatarUrl : chat.avatarUrl,
+    };
+  });
 }
 
 export function CyberChatApp() {
   const { width } = useWindowDimensions();
   const isWide = width >= 920;
   const [themeMode, setThemeMode] = useState('dark');
-  const [activeTab, setActiveTab] = useState('Inbox');
-  const [selectedFolder, setSelectedFolder] = useState('All');
+  const [activeTab, setActiveTab] = useState('Chats');
+  const [selectedList, setSelectedList] = useState('all');
   const [search, setSearch] = useState('');
-  const [selectedChatId, setSelectedChatId] = useState(initialChats[0].id);
+  const [selectedChatId, setSelectedChatId] = useState(null);
   const [mobilePanel, setMobilePanel] = useState('list');
   const [composerValue, setComposerValue] = useState('');
   const [replyTarget, setReplyTarget] = useState(null);
   const [selectedMessageId, setSelectedMessageId] = useState(null);
-  const [typingChatId, setTypingChatId] = useState('ts26');
   const [callVisible, setCallVisible] = useState(false);
-  const [chatState, setChatState] = useState(initialChats);
-  const [messageState, setMessageState] = useState(cloneMessages);
+  const [backendStatus, setBackendStatus] = useState({
+    state: 'probing',
+    label: 'API LINK PENDING',
+    detail: 'Waiting for MongoDB and Socket.io backend.',
+  });
+  const [socketStatus, setSocketStatus] = useState('offline');
+  const [authMode, setAuthMode] = useState('login');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [credentials, setCredentials] = useState({
+    name: '',
+    email: '',
+    password: '',
+  });
+  const [authState, setAuthState] = useState({
+    token: '',
+    user: null,
+  });
+  const [rawChats, setRawChats] = useState([]);
+  const [messagesState, setMessagesState] = useState({});
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [presenceMap, setPresenceMap] = useState({});
+  const [typingMap, setTypingMap] = useState({});
+  const [screenError, setScreenError] = useState('');
+  const [createChatVisible, setCreateChatVisible] = useState(false);
+  const [createChatMode, setCreateChatMode] = useState('direct');
+  const [userQuery, setUserQuery] = useState('');
+  const [userResults, setUserResults] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [selectedUserIds, setSelectedUserIds] = useState([]);
+  const [groupDraft, setGroupDraft] = useState({
+    name: '',
+    description: '',
+  });
+  const panelAnimation = useRef(new Animated.Value(0)).current;
+
+  const socketRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
+  const selectedChatIdRef = useRef(selectedChatId);
+  const authUserRef = useRef(authState.user);
 
   const theme = createTheme(themeMode);
+
+  useEffect(() => {
+    selectedChatIdRef.current = selectedChatId;
+  }, [selectedChatId]);
+
+  useEffect(() => {
+    authUserRef.current = authState.user;
+  }, [authState.user]);
 
   useEffect(() => {
     if (isWide) {
@@ -79,175 +404,642 @@ export function CyberChatApp() {
     }
   }, [isWide]);
 
-  const visibleChats = chatState.filter((chat) => {
-    const folderMatch = selectedFolder === 'All' || chat.tags.includes(selectedFolder);
-    const query = search.trim().toLowerCase();
-    const queryMatch =
-      !query ||
-      chat.title.toLowerCase().includes(query) ||
-      chat.preview.toLowerCase().includes(query) ||
-      chat.code.toLowerCase().includes(query);
+  useEffect(() => {
+    Animated.timing(panelAnimation, {
+      toValue: selectedChatId ? 1 : 0,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, [panelAnimation, selectedChatId]);
 
-    return folderMatch && queryMatch;
-  });
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 1800);
 
-  const selectedChat = chatState.find((chat) => chat.id === selectedChatId) || visibleChats[0] || chatState[0];
-  const allMessages = messageState[selectedChat?.id] || [];
-  const visibleMessages = allMessages.filter((message) => {
-    const query = search.trim().toLowerCase();
-    if (!query || activeTab !== 'Inbox') {
-      return true;
+    fetchBackendHealth(controller.signal)
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+
+        setBackendStatus({
+          state: 'online',
+          label: 'BACKEND ONLINE',
+          detail: payload.message || 'API healthy and ready for auth, chats, and sockets.',
+        });
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+
+        setBackendStatus({
+          state: 'offline',
+          label: 'BACKEND OFFLINE',
+          detail: 'Start /backend before testing auth, socket rooms, and live delivery.',
+        });
+      })
+      .finally(() => clearTimeout(timeoutId));
+
+    return () => {
+      active = false;
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authState.token) {
+      setRawChats([]);
+      setMessagesState({});
+      setSelectedChatId(null);
+      return;
     }
 
-    return (
-      (message.text || '').toLowerCase().includes(query) ||
-      (message.title || '').toLowerCase().includes(query) ||
-      (message.location || '').toLowerCase().includes(query) ||
-      (message.urlTitle || '').toLowerCase().includes(query)
-    );
-  });
+    let active = true;
+    setScreenError('');
 
-  function updateMessageStatus(chatId, messageId, status) {
-    setMessageState((current) => ({
-      ...current,
-      [chatId]: current[chatId].map((message) =>
-        message.id === messageId ? { ...message, status } : message,
-      ),
-    }));
-  }
+    Promise.all([fetchMe(authState.token), fetchChats(authState.token, selectedList)])
+      .then(([mePayload, chatsPayload]) => {
+        if (!active) {
+          return;
+        }
 
-  function appendMessage(chatId, message) {
-    setMessageState((current) => ({
-      ...current,
-      [chatId]: [...(current[chatId] || []), message],
-    }));
-  }
+        setAuthState((current) => ({
+          ...current,
+          user: mePayload.user,
+        }));
+        setRawChats(sortChats(chatsPayload.chats || []));
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
 
-  function pushCompanionReply(chat) {
-    setTypingChatId(chat.id);
-
-    setTimeout(() => {
-      appendMessage(chat.id, {
-        id: `auto-${Date.now()}`,
-        kind: 'text',
-        author: chat.title.split('/')[0].trim(),
-        fromMe: false,
-        text: createAutoReply(chat),
-        time: 'NOW',
-        status: 'delivered',
-        reactions: ['SYNC'],
+        setScreenError(error.message || 'Failed to load chats.');
       });
-      setTypingChatId(null);
-    }, 1300);
+
+    return () => {
+      active = false;
+    };
+  }, [authState.token, selectedList]);
+
+  useEffect(() => {
+    if (!authState.token || !createChatVisible) {
+      return;
+    }
+
+    let active = true;
+    setUsersLoading(true);
+
+    fetchUsers(authState.token, userQuery)
+      .then((payload) => {
+        if (active) {
+          setUserResults(payload.users || []);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setScreenError(error.message || 'Failed to load users.');
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setUsersLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authState.token, createChatVisible, userQuery]);
+
+  useEffect(() => {
+    if (!rawChats.length) {
+      setSelectedChatId(null);
+      return;
+    }
+
+    const exists = rawChats.some((chat) => String(chat._id) === String(selectedChatId));
+    if (!exists) {
+      setSelectedChatId(String(rawChats[0]._id));
+    }
+  }, [rawChats, selectedChatId]);
+
+  useEffect(() => {
+    if (!authState.token || !selectedChatId) {
+      return;
+    }
+
+    let active = true;
+    setMessagesLoading(true);
+
+    fetchMessages(authState.token, selectedChatId)
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+
+        setMessagesState((current) => ({
+          ...current,
+          [selectedChatId]: payload.messages || [],
+        }));
+
+        const unseenIds = (payload.messages || [])
+          .filter(
+            (message) =>
+              String(message.senderId?._id || message.senderId) !== String(authState.user?._id) &&
+              !(message.seenBy || []).some((entry) => String(entry) === String(authState.user?._id)),
+          )
+          .map((message) => String(message._id));
+
+        if (unseenIds.length) {
+          markChatSeen(authState.token, selectedChatId, unseenIds).catch(() => null);
+          socketRef.current?.emit('seen', { chatId: selectedChatId, messageIds: unseenIds });
+        }
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+
+        setScreenError(error.message || 'Failed to load messages.');
+      })
+      .finally(() => {
+        if (active) {
+          setMessagesLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authState.token, authState.user?._id, selectedChatId]);
+
+  useEffect(() => {
+    if (!authState.token || !authState.user) {
+      socketRef.current?.disconnect();
+      socketRef.current = null;
+      setSocketStatus('offline');
+      return undefined;
+    }
+
+    const socket = createChatSocket(authState.token);
+    socketRef.current = socket;
+    setSocketStatus('connecting');
+
+    const typingTimers = new Map();
+
+    socket.on('connect', () => {
+      setSocketStatus('online');
+    });
+
+    socket.on('disconnect', () => {
+      setSocketStatus('offline');
+    });
+
+    socket.on('presence', ({ userId, status }) => {
+      setPresenceMap((current) => ({
+        ...current,
+        [String(userId)]: status,
+      }));
+    });
+
+    socket.on('typing', ({ chatId, userId, name, isTyping }) => {
+      const key = String(chatId);
+
+      if (!isTyping) {
+        setTypingMap((current) => {
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+        return;
+      }
+
+      setTypingMap((current) => ({
+        ...current,
+        [key]: { userId: String(userId), name },
+      }));
+
+      clearTimeout(typingTimers.get(key));
+      const timeoutId = setTimeout(() => {
+        setTypingMap((current) => {
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+      }, 1400);
+
+      typingTimers.set(key, timeoutId);
+    });
+
+    socket.on('receive_message', ({ chatId, message }) => {
+      const key = String(chatId);
+
+      setMessagesState((current) => ({
+        ...current,
+        [key]: upsertMessage(current[key] || [], message),
+      }));
+
+      setRawChats((current) =>
+        sortChats(
+          current.map((chat) => {
+            if (String(chat._id) !== key) {
+              return chat;
+            }
+
+            const isMine =
+              String(message.senderId?._id || message.senderId) === String(authUserRef.current?._id);
+
+            return {
+              ...chat,
+              latestMessage: message,
+              updatedAt: message.createdAt || new Date().toISOString(),
+              membership: {
+                ...chat.membership,
+                unreadCount:
+                  !isMine && selectedChatIdRef.current !== key
+                    ? (chat.membership?.unreadCount || 0) + 1
+                    : selectedChatIdRef.current === key
+                      ? 0
+                      : chat.membership?.unreadCount || 0,
+              },
+            };
+          }),
+        ),
+      );
+
+      const isCurrentChat = selectedChatIdRef.current === key;
+      const isFromMe =
+        String(message.senderId?._id || message.senderId) === String(authUserRef.current?._id);
+
+      if (isCurrentChat && !isFromMe) {
+        socket.emit('seen', { chatId: key, messageIds: [String(message._id)] });
+      }
+    });
+
+    socket.on('message_status', ({ chatId, messageIds, userId, status }) => {
+      const key = String(chatId);
+      const targetIds = new Set((messageIds || []).map(String));
+
+      setMessagesState((current) => ({
+        ...current,
+        [key]: (current[key] || []).map((message) => {
+          if (!targetIds.has(String(message._id))) {
+            return message;
+          }
+
+          const deliveredTo = new Set((message.deliveredTo || []).map(String));
+          const seenBy = new Set((message.seenBy || []).map(String));
+
+          if (status === 'delivered') {
+            deliveredTo.add(String(userId));
+          }
+
+          if (status === 'seen') {
+            seenBy.add(String(userId));
+            deliveredTo.add(String(userId));
+          }
+
+          return {
+            ...message,
+            deliveredTo: [...deliveredTo],
+            seenBy: [...seenBy],
+          };
+        }),
+      }));
+    });
+
+    socket.on('seen', ({ chatId, messageIds, userId }) => {
+      const key = String(chatId);
+      const targetIds = new Set((messageIds || []).map(String));
+
+      setMessagesState((current) => ({
+        ...current,
+        [key]: (current[key] || []).map((message) => {
+          if (!targetIds.has(String(message._id))) {
+            return message;
+          }
+
+          const deliveredTo = new Set((message.deliveredTo || []).map(String));
+          const seenBy = new Set((message.seenBy || []).map(String));
+          deliveredTo.add(String(userId));
+          seenBy.add(String(userId));
+
+          return {
+            ...message,
+            deliveredTo: [...deliveredTo],
+            seenBy: [...seenBy],
+          };
+        }),
+      }));
+
+      if (selectedChatIdRef.current === key) {
+        setRawChats((current) =>
+          current.map((chat) =>
+            String(chat._id) === key
+              ? {
+                  ...chat,
+                  membership: {
+                    ...chat.membership,
+                    unreadCount: 0,
+                  },
+                }
+              : chat,
+          ),
+        );
+      }
+    });
+
+    socket.on('profile_updated', ({ userId, profile }) => {
+      setRawChats((current) =>
+        applyProfileUpdateToChats(current, {
+          userId,
+          profile,
+          currentUserId: authUserRef.current?._id,
+        }),
+      );
+
+      if (String(userId) === String(authUserRef.current?._id)) {
+        setAuthState((current) => ({
+          ...current,
+          user: current.user ? { ...current.user, ...profile } : current.user,
+        }));
+      }
+    });
+
+    return () => {
+      typingTimers.forEach((value) => clearTimeout(value));
+      socket.removeAllListeners();
+      socket.disconnect();
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+    };
+  }, [authState.token, authState.user]);
+
+  useEffect(() => {
+    if (!socketRef.current || !rawChats.length) {
+      return;
+    }
+
+    rawChats.forEach((chat) => {
+      socketRef.current.emit('join_chat', { chatId: String(chat._id) });
+    });
+  }, [rawChats]);
+
+  const liveChats = rawChats
+    .map((chat) => mapServerChat(chat, authState.user?._id, presenceMap))
+    .filter((chat) => {
+      const listMatch = getListMatch(chat, selectedList);
+      const query = search.trim().toLowerCase();
+      const queryMatch =
+        !query ||
+        chat.title.toLowerCase().includes(query) ||
+        chat.preview.toLowerCase().includes(query) ||
+        chat.code.toLowerCase().includes(query);
+
+      return listMatch && queryMatch;
+    });
+
+  const selectedRawChat =
+    rawChats.find((chat) => String(chat._id) === String(selectedChatId)) || rawChats[0] || null;
+  const selectedChat = selectedRawChat
+    ? mapServerChat(selectedRawChat, authState.user?._id, presenceMap)
+    : null;
+  const rawMessages = messagesState[selectedChat?.id] || [];
+  const liveMessages = rawMessages.map((message) => mapServerMessage(message, authState.user?._id));
+
+  const chatSummary = {
+    direct: rawChats.filter((chat) => chat.type === 'direct').length,
+    group: rawChats.filter((chat) => chat.type === 'group').length,
+    unread: rawChats.reduce((count, chat) => count + (chat.membership?.unreadCount || 0), 0),
+  };
+
+  async function handleAuthSubmit() {
+    setAuthBusy(true);
+    setAuthError('');
+
+    try {
+      const payload =
+        authMode === 'login'
+          ? await login({
+              email: credentials.email.trim(),
+              password: credentials.password,
+            })
+          : await register({
+              name: credentials.name.trim(),
+              email: credentials.email.trim(),
+              password: credentials.password,
+            });
+
+      setAuthState({
+        token: payload.token,
+        user: payload.user,
+      });
+      setCredentials({
+        name: '',
+        email: credentials.email,
+        password: '',
+      });
+    } catch (error) {
+      setAuthError(error.message || 'Authentication failed.');
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  function handleLogout() {
+    socketRef.current?.disconnect();
+    socketRef.current = null;
+    setAuthState({ token: '', user: null });
+    setPresenceMap({});
+    setTypingMap({});
+    setSelectedMessageId(null);
+    setReplyTarget(null);
+    setComposerValue('');
+  }
+
+  function openCreateChat() {
+    setCreateChatVisible(true);
+    setCreateChatMode('direct');
+    setSelectedUserIds([]);
+    setUserQuery('');
+    setGroupDraft({ name: '', description: '' });
+  }
+
+  function closeCreateChat() {
+    setCreateChatVisible(false);
+    setSelectedUserIds([]);
+    setUserQuery('');
+    setGroupDraft({ name: '', description: '' });
   }
 
   function handleSelectChat(chatId) {
     setSelectedChatId(chatId);
     setSelectedMessageId(null);
     setReplyTarget(null);
-    setChatState((current) =>
-      current.map((chat) => (chat.id === chatId ? { ...chat, unread: 0 } : chat)),
-    );
+    socketRef.current?.emit('join_chat', { chatId });
     if (!isWide) {
       setMobilePanel('chat');
     }
   }
 
-  function handleSend() {
-    if (!composerValue.trim() || !selectedChat) {
+  function toggleUserSelection(userId) {
+    setSelectedUserIds((current) => {
+      if (createChatMode === 'direct') {
+        return current[0] === userId ? [] : [userId];
+      }
+
+      return current.includes(userId)
+        ? current.filter((entry) => entry !== userId)
+        : [...current, userId];
+    });
+  }
+
+  async function handleCreateChatSubmit() {
+    if (!authState.token) {
       return;
     }
 
-    const messageId = `out-${Date.now()}`;
+    try {
+      let payload;
 
-    appendMessage(selectedChat.id, {
-      id: messageId,
-      kind: 'text',
-      author: 'You',
-      fromMe: true,
-      text: composerValue.trim(),
-      time: 'NOW',
-      status: 'sent',
-      replyTo: replyTarget?.id,
-      reactions: [],
+      if (createChatMode === 'direct') {
+        if (!selectedUserIds.length) {
+          setScreenError('Select one user for a direct chat.');
+          return;
+        }
+
+        payload = await createDirectChat(authState.token, selectedUserIds[0]);
+      } else {
+        if (selectedUserIds.length < 2) {
+          setScreenError('Select at least two users for a group chat.');
+          return;
+        }
+
+        if (!groupDraft.name.trim()) {
+          setScreenError('Enter a group name first.');
+          return;
+        }
+
+        payload = await createGroupChat(authState.token, {
+          name: groupDraft.name.trim(),
+          description: groupDraft.description.trim(),
+          memberIds: selectedUserIds,
+        });
+      }
+
+      const nextChat = payload.chat;
+      setRawChats((current) => sortChats([nextChat, ...current.filter((chat) => String(chat._id) !== String(nextChat._id))]));
+      handleSelectChat(String(nextChat._id));
+      socketRef.current?.emit('join_chat', { chatId: String(nextChat._id) });
+      closeCreateChat();
+      setScreenError('');
+    } catch (error) {
+      setScreenError(error.message || 'Failed to create chat.');
+    }
+  }
+
+  function handleComposerChange(value) {
+    setComposerValue(value);
+
+    if (!socketRef.current || !selectedChatId || !authState.user) {
+      return;
+    }
+
+    socketRef.current.emit('typing', {
+      chatId: selectedChatId,
+      isTyping: value.trim().length > 0,
     });
 
+    clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      socketRef.current?.emit('typing', {
+        chatId: selectedChatId,
+        isTyping: false,
+      });
+    }, 1200);
+  }
+
+  function handleSend() {
+    if (!composerValue.trim() || !selectedChatId || !socketRef.current || !authState.user) {
+      return;
+    }
+
+    const clientMessageId = `${authState.user._id}-${Date.now()}`;
+    const optimisticMessage = buildOptimisticMessage({
+      chatId: selectedChatId,
+      currentUser: authState.user,
+      text: composerValue.trim(),
+      clientMessageId,
+      replyTo: replyTarget,
+    });
+
+    setMessagesState((current) => ({
+      ...current,
+      [selectedChatId]: upsertMessage(current[selectedChatId] || [], optimisticMessage),
+    }));
+
+    setRawChats((current) =>
+      sortChats(
+        current.map((chat) =>
+          String(chat._id) === String(selectedChatId)
+            ? {
+                ...chat,
+                latestMessage: optimisticMessage,
+                updatedAt: optimisticMessage.createdAt,
+              }
+            : chat,
+        ),
+      ),
+    );
+
+    const outgoingText = composerValue.trim();
     setComposerValue('');
     setReplyTarget(null);
-    formatStatusSequence(updateMessageStatus, selectedChat.id, messageId);
-    pushCompanionReply(selectedChat);
+
+    socketRef.current.emit(
+      'send_message',
+      {
+        chatId: selectedChatId,
+        text: outgoingText,
+        clientMessageId,
+        replyTo: replyTarget?.id || null,
+      },
+      (acknowledgement) => {
+        if (!acknowledgement?.ok) {
+          setScreenError(acknowledgement?.message || 'Failed to send message.');
+        }
+      },
+    );
   }
 
   function handleQuickAction(action) {
-    if (!selectedChat) {
-      return;
-    }
-
     if (action === 'Call') {
       setCallVisible(true);
       return;
     }
 
-    const payloads = {
-      Voice: {
-        kind: 'voice',
-        text: 'Field note',
-        duration: '0:19',
-        waveform: [0.6, 0.3, 0.7, 0.9, 0.2, 0.5, 0.8, 0.6, 0.5, 0.9],
-      },
-      Poll: {
-        kind: 'poll',
-        text: 'Choose the next motion pass',
-        options: [
-          { label: 'Conversation hover', votes: 8 },
-          { label: 'Composer launch', votes: 12 },
-          { label: 'Presence pulse', votes: 4 },
-        ],
-      },
-      GIF: {
-        kind: 'text',
-        text: 'Dropped a brutalist GIF loop into the thread.',
-        reactions: ['GIF'],
-      },
-      Locate: {
-        kind: 'location',
-        text: 'Location beacon shared',
-        location: 'Cyber Yard - Sector 7',
-        coordinates: '28.6139, 77.2090',
-      },
-      Doc: {
-        kind: 'file',
-        title: 'AESTHETIC_SYSTEM_v1.pdf',
-        text: 'Theme spec, typography hierarchy, and animation notes.',
-        fileType: 'PDF',
-        size: '2.1 MB',
-      },
+    const presets = {
+      Voice: 'Voice note upload will be wired to media next.',
+      Poll: 'Poll card support is ready for the next API pass.',
+      GIF: 'GIF share queued from the composer lane.',
+      Locate: 'Location share trigger is staged for the next build.',
+      Doc: 'Document upload will use the backend attachment route.',
     };
 
-    const payload = payloads[action];
-    if (!payload) {
-      return;
-    }
-
-    const messageId = `action-${Date.now()}`;
-    appendMessage(selectedChat.id, {
-      id: messageId,
-      author: 'You',
-      fromMe: true,
-      time: 'NOW',
-      status: 'sent',
-      reactions: [],
-      ...payload,
-    });
-    formatStatusSequence(updateMessageStatus, selectedChat.id, messageId);
+    handleComposerChange(presets[action] || composerValue);
   }
 
   function handleMessageAction(action) {
-    if (!selectedMessageId || !selectedChat) {
+    if (!selectedMessageId || !selectedChatId) {
       return;
     }
 
-    const target = (messageState[selectedChat.id] || []).find((message) => message.id === selectedMessageId);
+    const target = liveMessages.find((message) => message.id === selectedMessageId);
     if (!target) {
       return;
     }
@@ -258,116 +1050,228 @@ export function CyberChatApp() {
     }
 
     if (action === 'Forward') {
-      appendMessage(selectedChat.id, {
-        id: `forward-${Date.now()}`,
-        kind: 'text',
-        author: 'You',
-        fromMe: true,
-        text: `Forwarded: ${target.text || target.title || target.location || 'Attachment'}`,
-        time: 'NOW',
-        status: 'sent',
-        reactions: ['FWD'],
-      });
+      setComposerValue(`Forwarded: ${target.text || target.title || target.location || 'Attachment'}`);
       return;
     }
 
-    setMessageState((current) => ({
-      ...current,
-      [selectedChat.id]: current[selectedChat.id].map((message) => {
-        if (message.id !== selectedMessageId) {
-          return message;
-        }
+    if (action === 'React') {
+      setMessagesState((current) => ({
+        ...current,
+        [selectedChatId]: (current[selectedChatId] || []).map((message) =>
+          String(message._id) === selectedMessageId
+            ? {
+                ...message,
+                reactions: (message.reactions || []).includes('FIRE')
+                  ? (message.reactions || []).filter((item) => item !== 'FIRE')
+                  : [...(message.reactions || []), 'FIRE'],
+              }
+            : message,
+        ),
+      }));
+      return;
+    }
 
-        if (action === 'React') {
-          const reactions = message.reactions || [];
-          return {
-            ...message,
-            reactions: reactions.includes('FIRE')
-              ? reactions.filter((item) => item !== 'FIRE')
-              : [...reactions, 'FIRE'],
-          };
-        }
-
-        if (action === 'Pin') {
-          return { ...message, pinned: !message.pinned };
-        }
-
-        if (action === 'Edit' && message.kind === 'text' && message.fromMe && !message.deleted) {
-          return { ...message, text: `${message.text} [edited]` };
-        }
-
-        if (action === 'Delete') {
-          return { ...message, deleted: true, reactions: [] };
-        }
-
-        return message;
-      }),
-    }));
+    if (action === 'Delete' || action === 'Edit' || action === 'Pin') {
+      setScreenError(`${action} is still UI-only until the next backend pass.`);
+    }
   }
 
   function toggleChatPin() {
-    if (!selectedChat) {
-      return;
-    }
+    setScreenError('Chat pin persistence is already supported in the backend but not yet wired in the app surface.');
+  }
 
-    setChatState((current) =>
-      current.map((chat) => (chat.id === selectedChat.id ? { ...chat, pinned: !chat.pinned } : chat)),
+  function renderAuthGate() {
+    return (
+      <View style={styles.authWrap}>
+        <CyberCard tone="mustard" theme={theme} style={styles.authCard}>
+          <Text style={[styles.heroCode, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
+            ACCESS
+          </Text>
+          <Text style={[styles.heroTitle, { color: theme.colors.ink }]}>
+            Connect the React Native app to live auth and realtime rooms.
+          </Text>
+          <Text style={[styles.heroBody, { color: theme.colors.ink }]}>
+            Register a user or log in with an existing account from your MongoDB backend. Once authenticated, chats and messages switch from seeded UI to live API and Socket.io data.
+          </Text>
+
+          <View style={styles.authModeRow}>
+            {['login', 'register'].map((mode) => (
+              <Pressable
+                key={mode}
+                onPress={() => setAuthMode(mode)}
+                style={[
+                  styles.authModeButton,
+                  {
+                    backgroundColor: authMode === mode ? theme.colors.ink : 'transparent',
+                    borderColor: theme.colors.ink,
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.authModeText,
+                    {
+                      color: authMode === mode ? theme.colors.neon : theme.colors.ink,
+                    },
+                  ]}
+                >
+                  {mode.toUpperCase()}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {authMode === 'register' ? (
+            <TextInput
+              placeholder="Display name"
+              placeholderTextColor="rgba(19, 16, 13, 0.6)"
+              value={credentials.name}
+              onChangeText={(value) => setCredentials((current) => ({ ...current, name: value }))}
+              style={[styles.authInput, { borderColor: theme.colors.ink, color: theme.colors.ink }]}
+            />
+          ) : null}
+
+          <TextInput
+            placeholder="Email"
+            autoCapitalize="none"
+            placeholderTextColor="rgba(19, 16, 13, 0.6)"
+            value={credentials.email}
+            onChangeText={(value) => setCredentials((current) => ({ ...current, email: value }))}
+            style={[styles.authInput, { borderColor: theme.colors.ink, color: theme.colors.ink }]}
+          />
+
+          <TextInput
+            placeholder="Password"
+            secureTextEntry
+            placeholderTextColor="rgba(19, 16, 13, 0.6)"
+            value={credentials.password}
+            onChangeText={(value) => setCredentials((current) => ({ ...current, password: value }))}
+            style={[styles.authInput, { borderColor: theme.colors.ink, color: theme.colors.ink }]}
+          />
+
+          {authError ? (
+            <Text style={[styles.authError, { color: theme.colors.ink }]}>{authError}</Text>
+          ) : null}
+
+          <Pressable
+            onPress={handleAuthSubmit}
+            style={[styles.authSubmit, { backgroundColor: theme.colors.ink }]}
+          >
+            <Text style={[styles.authSubmitText, { color: theme.colors.neon }]}>
+              {authBusy ? 'WORKING...' : authMode === 'login' ? 'ENTER CHATS' : 'CREATE ACCOUNT'}
+            </Text>
+          </Pressable>
+        </CyberCard>
+      </View>
     );
   }
 
-  function renderInbox() {
+  function renderChats() {
+    if (!authState.token) {
+      return renderAuthGate();
+    }
+
     return (
       <View style={[styles.mainGrid, isWide && styles.mainGridWide]}>
-        <View style={[styles.sidebar, isWide && styles.sidebarWide]}>
-          <CyberCard tone="mustard" theme={theme} style={styles.heroCard}>
-            <Text style={[styles.heroCode, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
-              CBRPNK
-            </Text>
-            <Text style={[styles.heroTitle, { color: theme.colors.ink }]}>
-              Aesthetic messaging system tuned to your reference board.
-            </Text>
-            <Text style={[styles.heroBody, { color: theme.colors.ink }]}>
-              Real-time chat, folders, reactions, calls, media, polls, and dark mode all shaped with industrial cards and sharp telemetry labels.
-            </Text>
-            <View style={styles.heroStats}>
-              <View style={[styles.heroStat, { borderColor: theme.colors.ink }]}>
-                <Text style={[styles.heroStatLabel, { color: theme.colors.ink }]}>LIVE</Text>
-                <Text style={[styles.heroStatValue, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
-                  571
+        {(isWide || mobilePanel === 'list') ? (
+          <View style={[styles.sidebar, isWide && styles.sidebarWide]}>
+            <CyberCard tone="mustard" theme={theme} style={styles.heroCard}>
+              <Text style={[styles.heroCode, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
+                CHATS
+              </Text>
+              <Text style={[styles.heroTitle, { color: theme.colors.ink }]}>
+                Live personal and group conversations filtered through custom lists.
+              </Text>
+              <Text style={[styles.heroBody, { color: theme.colors.ink }]}>
+                JWT auth, MongoDB chat history, live rooms, typing indicators, delivery receipts, seen state, and profile-photo broadcasts are now all part of the same mobile surface.
+              </Text>
+
+              <View style={styles.heroStats}>
+                <View style={[styles.heroStat, { borderColor: theme.colors.ink }]}>
+                  <Text style={[styles.heroStatLabel, { color: theme.colors.ink }]}>FRIENDS</Text>
+                  <Text style={[styles.heroStatValue, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
+                    {chatSummary.direct}
+                  </Text>
+                </View>
+                <View style={[styles.heroStat, { borderColor: theme.colors.ink }]}>
+                  <Text style={[styles.heroStatLabel, { color: theme.colors.ink }]}>GROUPS</Text>
+                  <Text style={[styles.heroStatValue, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
+                    {chatSummary.group}
+                  </Text>
+                </View>
+                <View style={[styles.heroStat, { borderColor: theme.colors.ink }]}>
+                  <Text style={[styles.heroStatLabel, { color: theme.colors.ink }]}>UNREAD</Text>
+                  <Text style={[styles.heroStatValue, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
+                    {chatSummary.unread}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={[styles.backendCard, { borderColor: theme.colors.ink }]}>
+                <Text style={[styles.heroStatLabel, { color: theme.colors.ink }]}>
+                  {backendStatus.label} / SOCKET {socketStatus.toUpperCase()}
+                </Text>
+                <Text style={[styles.backendDetail, { color: theme.colors.ink }]}>
+                  {backendStatus.detail}
+                </Text>
+                <Text style={[styles.backendDetail, { color: theme.colors.ink }]}>
+                  {authState.user?.email}
                 </Text>
               </View>
-              <View style={[styles.heroStat, { borderColor: theme.colors.ink }]}>
-                <Text style={[styles.heroStatLabel, { color: theme.colors.ink }]}>SYNC</Text>
-                <Text style={[styles.heroStatValue, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
-                  2.47
-                </Text>
+            </CyberCard>
+
+            <View style={styles.sectionSpacing}>
+              <View style={styles.sectionTopRow}>
+                <Text style={[styles.sectionLabel, { color: theme.colors.textMuted }]}>CUSTOM LISTS</Text>
+                <View style={styles.sectionActions}>
+                  <Pressable onPress={openCreateChat}>
+                    <Text style={[styles.sectionAction, { color: theme.colors.neon }]}>NEW CHAT</Text>
+                  </Pressable>
+                  <Pressable onPress={handleLogout}>
+                    <Text style={[styles.sectionAction, { color: theme.colors.neon }]}>LOG OUT</Text>
+                  </Pressable>
+                </View>
               </View>
-            </View>
-          </CyberCard>
-
-          <View style={styles.sectionSpacing}>
-            <FolderStrip
-              folders={folders}
-              selected={selectedFolder}
-              onSelect={setSelectedFolder}
-              theme={theme}
-            />
-          </View>
-
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.conversationList}>
-            {visibleChats.map((chat) => (
-              <ConversationListItem
-                key={chat.id}
-                chat={chat}
-                active={chat.id === selectedChat?.id}
+              <FolderStrip
+                folders={chatLists}
+                selected={selectedList}
+                onSelect={setSelectedList}
                 theme={theme}
-                onPress={() => handleSelectChat(chat.id)}
               />
-            ))}
-          </ScrollView>
-        </View>
+            </View>
 
-        {(isWide || mobilePanel === 'chat') && selectedChat ? renderChatPanel() : null}
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.conversationList}>
+              {liveChats.map((chat) => (
+                <ConversationListItem
+                  key={chat.id}
+                  chat={chat}
+                  active={chat.id === selectedChat?.id}
+                  theme={theme}
+                  onPress={() => handleSelectChat(chat.id)}
+                />
+              ))}
+            </ScrollView>
+          </View>
+        ) : null}
+
+        {(isWide || mobilePanel === 'chat') && selectedChat ? (
+          <Animated.View
+            style={{
+              flex: 1,
+              opacity: panelAnimation,
+              transform: [
+                {
+                  translateX: panelAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [18, 0],
+                  }),
+                },
+              ],
+            }}
+          >
+            {renderChatPanel()}
+          </Animated.View>
+        ) : null}
       </View>
     );
   }
@@ -386,7 +1290,6 @@ export function CyberChatApp() {
         contentContainerStyle={styles.actionRow}
       >
         {actions.map((action, index) => {
-          const toneKeys = ['mustard', 'olive', 'fog', 'salmon'];
           const panel = theme.panels[toneKeys[index % toneKeys.length]];
 
           return (
@@ -406,6 +1309,8 @@ export function CyberChatApp() {
   }
 
   function renderChatPanel() {
+    const typingEntry = typingMap[selectedChat?.id];
+
     return (
       <View style={styles.chatPane}>
         <CyberCard tone={selectedChat?.tone || 'fog'} theme={theme} style={styles.chatHeader}>
@@ -419,7 +1324,7 @@ export function CyberChatApp() {
             )}
             <View style={styles.headerRight}>
               <Text style={[styles.headerMini, { color: theme.colors.ink }]}>
-                {typingChatId === selectedChat?.id ? 'TYPING...' : selectedChat?.online ? 'ONLINE' : 'OFFLINE'}
+                {typingEntry ? 'TYPING...' : selectedChat?.online ? 'ONLINE' : 'OFFLINE'}
               </Text>
               <Pressable onPress={() => setThemeMode((current) => (current === 'dark' ? 'light' : 'dark'))}>
                 <Text style={[styles.headerMini, { color: theme.colors.ink }]}>
@@ -429,12 +1334,28 @@ export function CyberChatApp() {
             </View>
           </View>
 
-          <Text style={[styles.chatTitle, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
-            {selectedChat?.title}
-          </Text>
+          <View style={styles.chatIdentityRow}>
+            <Image
+              source={{ uri: selectedChat?.avatarUrl }}
+              style={[styles.chatAvatar, { borderColor: theme.colors.ink }]}
+            />
+            <View style={styles.chatIdentityText}>
+              <Text style={[styles.chatTitle, { color: theme.colors.ink, fontFamily: theme.fonts.display }]}>
+                {selectedChat?.title}
+              </Text>
+              <Text style={[styles.chatSubtitle, { color: theme.colors.ink }]}>
+                {selectedChat?.conversationType === 'direct'
+                  ? 'Live friend thread over Socket.io'
+                  : `${selectedChat?.memberCount || 0} members in this live room`}
+              </Text>
+            </View>
+          </View>
 
           <View style={styles.chatHeaderMeta}>
             <Text style={[styles.chatCode, { color: theme.colors.ink }]}>{selectedChat?.code}</Text>
+            <Text style={[styles.chatCode, { color: theme.colors.ink }]}>
+              {selectedChat?.conversationType === 'direct' ? 'FRIEND CHAT' : 'GROUP CHAT'}
+            </Text>
             <Pressable onPress={toggleChatPin}>
               <Text style={[styles.chatCode, { color: theme.colors.ink }]}>
                 {selectedChat?.pinned ? 'UNPIN CHAT' : 'PIN CHAT'}
@@ -448,20 +1369,28 @@ export function CyberChatApp() {
 
         {renderMessageActionRow()}
 
-        <ScrollView style={styles.messageScroll} showsVerticalScrollIndicator={false} contentContainerStyle={styles.messageContent}>
-          {typingChatId === selectedChat?.id ? (
+        <ScrollView
+          style={styles.messageScroll}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.messageContent}
+        >
+          {typingEntry ? (
             <Text style={[styles.typingIndicator, { color: theme.colors.textMuted }]}>
-              {selectedChat.title} is typing...
+              {typingEntry.name} is typing...
             </Text>
           ) : null}
 
-          {visibleMessages.map((message) => (
+          {messagesLoading ? (
+            <Text style={[styles.typingIndicator, { color: theme.colors.textMuted }]}>Loading room...</Text>
+          ) : null}
+
+          {liveMessages.map((message) => (
             <MessageBubble
               key={message.id}
               message={message}
               theme={theme}
               selected={message.id === selectedMessageId}
-              replyPreview={buildReplySnippet(allMessages, message.replyTo)}
+              replyPreview={buildReplySnippet(liveMessages, message.replyTo, message.replyPreview)}
               onPress={() => setSelectedMessageId((current) => (current === message.id ? null : message.id))}
             />
           ))}
@@ -470,7 +1399,7 @@ export function CyberChatApp() {
         <ComposerDock
           theme={theme}
           value={composerValue}
-          onChange={setComposerValue}
+          onChange={handleComposerChange}
           onSend={handleSend}
           onQuickAction={handleQuickAction}
           replyTarget={replyTarget}
@@ -511,7 +1440,6 @@ export function CyberChatApp() {
     return (
       <ScrollView contentContainerStyle={styles.callsWrap} showsVerticalScrollIndicator={false}>
         {stackBlueprint.map((item, index) => {
-          const toneKeys = ['mustard', 'olive', 'fog', 'salmon'];
           const tone = toneKeys[index % toneKeys.length];
           const panel = theme.panels[tone];
 
@@ -529,7 +1457,7 @@ export function CyberChatApp() {
     );
   }
 
-  const tabs = ['Inbox', 'Calls', 'Vault'];
+  const tabs = ['Chats', 'Calls', 'Vault'];
 
   return (
     <View style={[styles.root, { backgroundColor: theme.colors.background }]}>
@@ -552,6 +1480,7 @@ export function CyberChatApp() {
               },
             ]}
           />
+          {screenError ? <Text style={[styles.screenError, { color: theme.colors.alert }]}>{screenError}</Text> : null}
         </View>
 
         <View style={styles.tabsRow}>
@@ -585,7 +1514,7 @@ export function CyberChatApp() {
           })}
         </View>
 
-        {activeTab === 'Inbox' ? renderInbox() : null}
+        {activeTab === 'Chats' ? renderChats() : null}
         {activeTab === 'Calls' ? renderCalls() : null}
         {activeTab === 'Vault' ? renderVault() : null}
       </View>
@@ -595,6 +1524,29 @@ export function CyberChatApp() {
         onClose={() => setCallVisible(false)}
         theme={theme}
         chat={selectedChat}
+      />
+      <CreateChatOverlay
+        visible={createChatVisible}
+        theme={theme}
+        users={userResults}
+        loading={usersLoading}
+        mode={createChatMode}
+        groupName={groupDraft.name}
+        groupDescription={groupDraft.description}
+        query={userQuery}
+        selectedIds={selectedUserIds}
+        onClose={closeCreateChat}
+        onModeChange={(mode) => {
+          setCreateChatMode(mode);
+          setSelectedUserIds([]);
+        }}
+        onQueryChange={setUserQuery}
+        onGroupNameChange={(value) => setGroupDraft((current) => ({ ...current, name: value }))}
+        onGroupDescriptionChange={(value) =>
+          setGroupDraft((current) => ({ ...current, description: value }))
+        }
+        onToggleUser={toggleUserSelection}
+        onSubmit={handleCreateChatSubmit}
       />
     </View>
   );
@@ -624,6 +1576,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
   },
+  screenError: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
   tabsRow: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -638,6 +1595,54 @@ const styles = StyleSheet.create({
   tabText: {
     fontSize: 12,
     letterSpacing: 1.1,
+  },
+  authWrap: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  authCard: {
+    padding: spacing.lg,
+  },
+  authModeRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.lg,
+    marginBottom: spacing.md,
+  },
+  authModeButton: {
+    borderRadius: 999,
+    borderWidth: 1.5,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  authModeText: {
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+  authInput: {
+    borderRadius: radii.md,
+    borderWidth: 1.5,
+    fontSize: 14,
+    marginBottom: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  authError: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.9,
+    marginBottom: spacing.md,
+  },
+  authSubmit: {
+    alignItems: 'center',
+    borderRadius: radii.md,
+    paddingVertical: spacing.md,
+  },
+  authSubmitText: {
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 1.3,
   },
   mainGrid: {
     flex: 1,
@@ -693,8 +1698,39 @@ const styles = StyleSheet.create({
     fontSize: 28,
     letterSpacing: 1.4,
   },
+  backendCard: {
+    borderRadius: radii.md,
+    borderWidth: 1.5,
+    marginTop: spacing.md,
+    padding: spacing.md,
+  },
+  backendDetail: {
+    fontSize: 12,
+    lineHeight: 18,
+    opacity: 0.88,
+  },
   sectionSpacing: {
     marginTop: spacing.sm,
+  },
+  sectionTopRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  sectionActions: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.4,
+    marginBottom: spacing.xs,
+  },
+  sectionAction: {
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.4,
   },
   conversationList: {
     paddingTop: spacing.sm,
@@ -724,6 +1760,27 @@ const styles = StyleSheet.create({
   chatTitle: {
     fontSize: 30,
     letterSpacing: 1.4,
+  },
+  chatIdentityRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  chatIdentityText: {
+    flex: 1,
+  },
+  chatAvatar: {
+    borderRadius: 28,
+    borderWidth: 1.5,
+    height: 56,
+    width: 56,
+  },
+  chatSubtitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.9,
+    marginTop: 4,
+    opacity: 0.82,
   },
   chatHeaderMeta: {
     flexDirection: 'row',

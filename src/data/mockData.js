@@ -1,10 +1,18 @@
-export const folders = ['All', 'Priority', 'Crew', 'Media', 'Calls', 'Vault'];
+export const chatLists = [
+  { key: 'all', label: 'ALL LINES' },
+  { key: 'friends', label: 'FRIENDS' },
+  { key: 'groups', label: 'GROUPS' },
+  { key: 'priority', label: 'PRIORITY' },
+  { key: 'unread', label: 'UNREAD' },
+  { key: 'pinned', label: 'PINNED' },
+];
 
 export const chats = [
   {
     id: 'ua-570-b',
     code: 'UA 570-B',
     title: 'NOVA / DIRECT',
+    avatarUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=300&q=80',
     preview: 'Prototype pass feels ready for the midnight build.',
     timestamp: '02:47',
     unread: 3,
@@ -12,12 +20,15 @@ export const chats = [
     pinned: true,
     tone: 'mustard',
     type: '1:1',
-    tags: ['Priority', 'Calls'],
+    conversationType: 'direct',
+    memberCount: 2,
+    lists: ['friends', 'priority', 'pinned'],
   },
   {
     id: 'ts26',
     code: 'TS26',
     title: 'DPM SYSTM',
+    avatarUrl: 'https://images.unsplash.com/photo-1521737604893-d14cc237f11d?auto=format&fit=crop&w=300&q=80',
     preview: 'Pinned the release checklist and moved the assets into Vault.',
     timestamp: '11:08',
     unread: 0,
@@ -25,12 +36,15 @@ export const chats = [
     pinned: false,
     tone: 'olive',
     type: 'Group',
-    tags: ['Crew', 'Vault'],
+    conversationType: 'group',
+    memberCount: 8,
+    lists: ['groups'],
   },
   {
     id: 'retro-25',
     code: 'R25',
     title: 'RETRO AI',
+    avatarUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=300&q=80',
     preview: 'GIF pack updated. Poll is live for the landing motion.',
     timestamp: '09:14',
     unread: 6,
@@ -38,12 +52,15 @@ export const chats = [
     pinned: true,
     tone: 'fog',
     type: 'Studio',
-    tags: ['Media', 'Crew'],
+    conversationType: 'group',
+    memberCount: 15,
+    lists: ['groups', 'priority', 'pinned'],
   },
   {
     id: 'sector-01',
     code: '01',
     title: 'SECTOR-01',
+    avatarUrl: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=300&q=80',
     preview: 'Voice room open. Screen share starts in 4 minutes.',
     timestamp: '08:52',
     unread: 1,
@@ -51,7 +68,9 @@ export const chats = [
     pinned: false,
     tone: 'salmon',
     type: 'Ops',
-    tags: ['Calls', 'Priority'],
+    conversationType: 'group',
+    memberCount: 5,
+    lists: ['groups', 'priority'],
   },
 ];
 
@@ -160,7 +179,7 @@ export const messagesByChat = {
       kind: 'text',
       author: 'You',
       fromMe: true,
-      text: 'Nice. Add a category ribbon so the inbox feels sorted before a user even searches.',
+      text: 'Nice. Add a category ribbon so the chats tab feels sorted before a user even searches.',
       time: '08:49',
       status: 'seen',
     },
@@ -218,18 +237,18 @@ export const callMoments = [
 export const stackBlueprint = [
   {
     label: 'Realtime',
-    detail: 'Socket.io or Firebase streams for live messages, typing, presence, and status receipts.',
+    detail: 'Socket.io rooms drive live messages, typing state, delivery receipts, and seen receipts.',
   },
   {
     label: 'Push',
-    detail: 'Expo Notifications bridge for unread alerts, mentions, calls, and quiet-hour routing.',
+    detail: 'Firebase Cloud Messaging handles unread alerts, call invites, and background notifications.',
   },
   {
     label: 'Media',
-    detail: 'Blob upload pipeline for images, docs, voice notes, waveform metadata, and file previews.',
+    detail: 'MongoDB messages store Cloudinary or S3 file URLs for images, docs, voice notes, and previews.',
   },
   {
-    label: 'WebRTC',
-    detail: 'LiveKit or custom SFU layer for voice, video, and screen sharing rooms.',
+    label: 'Data',
+    detail: 'JWT auth, MongoDB indexes, and Redis-ready presence layers keep the backend scalable.',
   },
 ];

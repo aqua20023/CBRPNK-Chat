@@ -1,12 +1,34 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef } from 'react';
+import { Animated, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { spacing } from '../theme/theme';
 import { CyberCard } from './CyberCard';
 
 export function ConversationListItem({ chat, active, theme, onPress }) {
   const panel = theme.panels[chat.tone];
+  const animatedValue = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.spring(animatedValue, {
+      toValue: active ? 1 : 0,
+      friction: 9,
+      tension: 90,
+      useNativeDriver: true,
+    }).start();
+  }, [active, animatedValue]);
+
+  const scale = animatedValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 0.985],
+  });
+
+  const translateY = animatedValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -2],
+  });
 
   return (
-    <Pressable onPress={onPress}>
+    <Animated.View style={{ transform: [{ scale }, { translateY }] }}>
+      <Pressable onPress={onPress}>
       <CyberCard
         tone={chat.tone}
         theme={theme}
@@ -14,7 +36,6 @@ export function ConversationListItem({ chat, active, theme, onPress }) {
           styles.card,
           active && {
             borderWidth: 2.5,
-            transform: [{ scale: 0.99 }],
           },
         ]}
       >
@@ -29,9 +50,12 @@ export function ConversationListItem({ chat, active, theme, onPress }) {
         </View>
 
         <View style={styles.titleRow}>
-          <Text style={[styles.title, { color: panel.text, fontFamily: theme.fonts.display }]}>
-            {chat.title}
-          </Text>
+          <View style={styles.identityRow}>
+            <Image source={{ uri: chat.avatarUrl }} style={[styles.avatar, { borderColor: panel.border }]} />
+            <Text style={[styles.title, { color: panel.text, fontFamily: theme.fonts.display }]}>
+              {chat.title}
+            </Text>
+          </View>
           <View
             style={[
               styles.presence,
@@ -45,9 +69,14 @@ export function ConversationListItem({ chat, active, theme, onPress }) {
         </Text>
 
         <View style={styles.bottomRow}>
-          <Text style={[styles.badge, { color: panel.text, borderColor: panel.border }]}>
-            {chat.type}
-          </Text>
+          <View style={styles.badgeRow}>
+            <Text style={[styles.badge, { color: panel.text, borderColor: panel.border }]}>
+              {chat.type}
+            </Text>
+            <Text style={[styles.metaText, { color: panel.text }]}>
+              {chat.memberCount} NODES
+            </Text>
+          </View>
           {chat.unread ? (
             <View style={[styles.unread, { backgroundColor: panel.border }]}>
               <Text style={[styles.unreadText, { color: panel.base }]}>{chat.unread}</Text>
@@ -57,7 +86,8 @@ export function ConversationListItem({ chat, active, theme, onPress }) {
           )}
         </View>
       </CyberCard>
-    </Pressable>
+      </Pressable>
+    </Animated.View>
   );
 }
 
@@ -78,9 +108,21 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: spacing.sm,
   },
+  identityRow: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
   rightMeta: {
     alignItems: 'flex-end',
     gap: 4,
+  },
+  avatar: {
+    borderRadius: 18,
+    borderWidth: 1.5,
+    height: 36,
+    width: 36,
   },
   code: {
     fontSize: 22,
@@ -101,6 +143,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
+  },
+  badgeRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
   },
   badge: {
     borderRadius: 999,

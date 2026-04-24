@@ -9,14 +9,15 @@ export function FolderStrip({ folders, selected, onSelect, theme }) {
       contentContainerStyle={styles.content}
     >
       {folders.map((folder, index) => {
+        const item = typeof folder === 'string' ? { key: folder, label: folder } : folder;
         const toneKeys = ['mustard', 'olive', 'fog', 'salmon'];
         const tone = theme.panels[toneKeys[index % toneKeys.length]];
-        const active = folder === selected;
+        const active = item.key === selected;
 
         return (
           <Pressable
-            key={folder}
-            onPress={() => onSelect(folder)}
+            key={item.key}
+            onPress={() => onSelect(item.key)}
             style={[
               styles.pill,
               {
@@ -34,7 +35,7 @@ export function FolderStrip({ folders, selected, onSelect, theme }) {
                 },
               ]}
             >
-              {folder}
+              {item.label}
             </Text>
           </Pressable>
         );

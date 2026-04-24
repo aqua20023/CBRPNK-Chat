@@ -5,8 +5,8 @@ React Native chat app scaffold shaped around the industrial cyberpunk reference 
 ## What is already built
 
 - A fresh Expo-based React Native shell
-- Responsive inbox and conversation layouts
-- Foldered inbox categories like Telegram
+- A dedicated `Chats` tab for personal and group conversations
+- Custom chat list filters for friends, groups, unread, priority, and pinned threads
 - Search for chats and in-thread content
 - Message states: sent, delivered, seen
 - Typing indicator and online/offline presence cues
@@ -14,14 +14,8 @@ React Native chat app scaffold shaped around the industrial cyberpunk reference 
 - Voice note, file, poll, location, and link-preview message cards
 - Call overlay for voice/video/screen-share entry points
 - Theme toggle that keeps the same visual language across dark and light modes
-
-## Suggested production stack for the remaining backend work
-
-- Realtime messaging: `Socket.io`, `Firebase`, or `Supabase Realtime`
-- Push notifications: `expo-notifications`
-- Media uploads and file previews: object storage plus signed URLs
-- Voice/video/screen sharing: `LiveKit`, `Daily`, or custom WebRTC SFU
-- Auth and presence: Firebase Auth, Clerk, Supabase Auth, or your own JWT backend
+- Frontend API and Socket.io connection scaffolding
+- A full `/backend` service with MongoDB, JWT auth, Socket.io, Cloudinary hooks, and FCM hooks
 
 ## Project structure
 
@@ -29,18 +23,46 @@ React Native chat app scaffold shaped around the industrial cyberpunk reference 
 - [src/screens/CyberChatApp.js](</C:/Users/JAI VERMA/Documents/New project/src/screens/CyberChatApp.js>)
 - [src/components/MessageBubble.js](</C:/Users/JAI VERMA/Documents/New project/src/components/MessageBubble.js>)
 - [src/components/ComposerDock.js](</C:/Users/JAI VERMA/Documents/New project/src/components/ComposerDock.js>)
+- [src/config/network.js](</C:/Users/JAI VERMA/Documents/New project/src/config/network.js>)
+- [src/services/chatApi.js](</C:/Users/JAI VERMA/Documents/New project/src/services/chatApi.js>)
+- [src/services/socketClient.js](</C:/Users/JAI VERMA/Documents/New project/src/services/socketClient.js>)
 - [src/theme/theme.js](</C:/Users/JAI VERMA/Documents/New project/src/theme/theme.js>)
 - [src/data/mockData.js](</C:/Users/JAI VERMA/Documents/New project/src/data/mockData.js>)
+- [backend/src/index.js](</C:/Users/JAI VERMA/Documents/New project/backend/src/index.js>)
+- [backend/src/controllers](</C:/Users/JAI VERMA/Documents/New project/backend/src/controllers>)
+- [backend/src/models](</C:/Users/JAI VERMA/Documents/New project/backend/src/models>)
+- [backend/src/routes](</C:/Users/JAI VERMA/Documents/New project/backend/src/routes>)
+- [backend/src/sockets](</C:/Users/JAI VERMA/Documents/New project/backend/src/sockets>)
+- [backend/.env.example](</C:/Users/JAI VERMA/Documents/New project/backend/.env.example>)
 
 ## Run locally
 
+### Backend
+
+1. Copy `backend/.env.example` to `backend/.env`
+2. Fill in `MONGODB_URI`, `JWT_SECRET`, and any optional Cloudinary or Firebase credentials
+3. Start MongoDB
+4. Run `cd backend`
+5. Run `npm install`
+6. Run `npm run dev`
+
+### Frontend
+
 1. Install dependencies with `npm install`
-2. Start Expo with `npx expo start`
-3. Open Android, iOS, or web from the Expo dev tools
+2. If you are testing on a physical phone, update `BACKEND_HOST` in [src/config/network.js](</C:/Users/JAI VERMA/Documents/New project/src/config/network.js>) to your computer's LAN IP
+3. Start Expo with `npx expo start`
+4. Open Android with `npx expo start --android` or web with `npx expo start --web`
+
+## Notes
+
+- Use `npx expo ...`, not `expo ...`, unless you have Expo CLI installed globally.
+- If Expo Go says the project is incompatible, update Expo Go from the Play Store before scanning the QR code again.
+- Do not run a second `npm audit fix --force` here. The current audit output shows that it would downgrade Expo to `46.0.21`, which would break this SDK 55 project.
+- The default Android emulator backend host is `10.0.2.2`. A physical device needs your computer's real LAN IP instead.
 
 ## Next build steps
 
-1. Wire the UI state to a real backend for live messages, receipts, and presence.
-2. Add auth, profile setup, and media upload flows.
+1. Replace the seeded frontend state with live auth, chat, and message queries from the new backend.
+2. Add a real sign-in and register flow that stores the JWT and opens the socket connection.
 3. Replace the call overlay with a proper WebRTC room implementation.
 4. Add animations, haptics, and custom font assets to push the aesthetic even further.
