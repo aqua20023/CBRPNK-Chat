@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "CBRPNK Chat",
+    "slug": "cbrpnk-chat",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#050505"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {
+      "package": "com.cbrpnk.chat"
+    },
+    "ios": {
+      "bundleIdentifier": "com.cbrpnk.chat"
+    }
+  }
+}
